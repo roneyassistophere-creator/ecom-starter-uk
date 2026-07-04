@@ -38,6 +38,7 @@ export default async function initial_data_seed({
   // exists the store is already set up, so skip. Without this, the script errors
   // partway (data already exists), never gets marked complete, and re-runs on every
   // `db:migrate` — creating duplicate sales channels / stock locations each time.
+  logger.info("initial-data-seed: checking if store is already seeded...");
   const { data: existingRegions } = await query.graph({
     entity: "region",
     fields: ["id"],

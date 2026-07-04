@@ -399,11 +399,40 @@ migrations applied → `Server is ready`. Migrations are idempotent — repeat d
 
 ---
 
-#### Fallback — migrate from your LOCAL machine over an SSH tunnel
+#### If in-container migrate stalls
 
-Only needed if in-container migrate **stalls** on your host (observed once on a specific Coolify
-VPS: `db:migrate` hung after creating the `mikro_orm_migrations` table — OS/memory/network/lock
-contention all ruled out; the identical command ran fine from local). If that happens, make the
+`db:migrate` has, on at least one VPS, hung right after creating the `mikro_orm_migrations` table
+with no further log output (OS/memory/network/lock contention were all suspected but never
+conclusively pinned down). The container's `CMD` now bounds the migrate step so this fails loud
+instead of hanging forever:
+
+```
+CMD ["sh", "-c", "PGOPTIONS='-c lock_timeout=30000 -c statement_timeout=180000' timeout 300 npx medusa db:migrate && exec npx medusa start"]
+```
+
+- `lock_timeout=30000` / `statement_timeout=180000` — a blocked lock or a runaway statement now
+  errors out within 30s / 3min with a named Postgres error, instead of hanging silently.
+- `timeout 300` — a hard 5-minute wall-clock ceiling catches any other stall (e.g. a stuck network
+  read) that isn't lock- or statement-related.
+
+Either way the container now **exits non-zero** instead of hanging forever, so Dokploy's restart
+policy can retry. Migrations are idempotent (see below), so a retry after a transient lock (e.g. a
+previous container still shutting down and holding a connection) can self-heal with no manual step.
+
+Watch the logs on the next deploy attempt:
+- Succeeds within 5 minutes → it was just slow (large migration set on a small VPS), not broken.
+- Fails fast with a Postgres `lock timeout` / `statement timeout` error → confirms lock
+  contention — check whether Dokploy is keeping a previous container/connection alive during the
+  new deploy (add/verify a health check, or ensure old containers fully stop before the new one
+  starts).
+- Times out at 5 minutes with no Postgres error → points to a network/connectivity stall between
+  the container and DB inside Dokploy's Docker network — `docker exec` into the container and check
+  DNS/reachability to the DB host directly.
+
+#### Escape hatch — migrate from your LOCAL machine over an SSH tunnel
+
+Only needed if the container **still** fails after the timeout above (i.e. it can't reach/migrate
+the DB from inside the container network at all, even given 5 minutes). If that happens, make the
 Dockerfile start command `medusa start` only and run migrations from local instead:
 
 **One-time prep:** find the Postgres container's IP on the Docker network (SSH into the VPS):
@@ -530,9 +559,9 @@ open https://shop.acmeshop.com                # should load the store
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| Backend crashes on start with `relation "X" does not exist` | Migrations never ran | Run migrations from local (Section 7a) — they hang inside the container |
-| `medusa db:migrate` hangs at `Running migrations...` (in the container) | Known issue in this deployed env | Run migrations from your **local** machine over an SSH tunnel (Section 7a). Don't put `db:migrate` in the container CMD. |
-| Backend deploy succeeds then exits "10x restarts" | App crashed on start (usually missing tables) | Check **runtime** logs (not build logs); run migrations (Section 7a) |
+| Backend crashes on start with `relation "X" does not exist` | Migrations never ran | Check runtime logs for a migrate error; if it truly can't run in-container, use the SSH tunnel escape hatch (Section 7a) |
+| `medusa db:migrate` hangs at `Running migrations...` (in the container) | Blocked lock / stalled connection | The container CMD now bounds this with `lock_timeout`/`statement_timeout`/`timeout 300` (Section 7a) — it will fail fast with a Postgres error or a timeout instead of hanging forever. If it still can't complete after that, use the SSH tunnel escape hatch. |
+| Backend deploy succeeds then exits "10x restarts" | App crashed on start, or migrate keeps failing the bounded timeout (Section 7a) | Check **runtime** logs (not build logs) for the specific Postgres/timeout error |
 | Build fails: `npm error ERESOLVE ... peer @medusajs/framework` | A `^`-ranged `@medusajs/*` dep resolved to a newer minor than `framework` | Pin `@medusajs/file-s3` and `@medusajs/payment-stripe` to the exact framework version (e.g. `2.15.5`) in `apps/backend/package.json` |
 | Build fails at `npm install` with exit 255 (no error text) | Build host OOM — backend + storefront building at once | Deploy one app at a time; raise build timeout to 3600 |
 | Backend crashes on start | `DATABASE_URL` wrong or DB not yet ready | Check connection string; ensure PG resource is deployed before backend. Inside containers `DATABASE_URL` must use the DB's **internal** Docker hostname, not `localhost` |

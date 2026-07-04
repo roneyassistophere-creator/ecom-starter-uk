@@ -20,6 +20,8 @@ ENV NODE_ENV=production
 EXPOSE 9000
 
 # Run DB migrations, then start — both from inside .medusa/server (cwd matters).
+# PGOPTIONS bounds lock/statement waits so a blocked migration fails loud instead of
+# hanging forever; `timeout` is a final wall-clock safety net for any other stall.
 # `&&` fails fast if a schema migration errors (never start on a bad schema);
 # `exec` hands signals directly to the Medusa server for clean shutdowns.
-CMD ["sh", "-c", "npx medusa db:migrate && exec npx medusa start"]
+CMD ["sh", "-c", "PGOPTIONS='-c lock_timeout=30000 -c statement_timeout=180000' timeout 300 npx medusa db:migrate && exec npx medusa start"]
