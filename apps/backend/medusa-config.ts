@@ -31,6 +31,23 @@ const hasBkash =
 module.exports = defineConfig({
   projectConfig: {
     databaseUrl: process.env.DATABASE_URL,
+    databaseDriverOptions: {
+      // `as any` is required — Medusa's type only declares connection.ssl, so without the
+      // cast tsc/medusa build fails with "No overload matches this call". createPgConnection
+      // and the pg driver do read these keepAlive/timeout keys at runtime.
+      //
+      // Medusa forces keepAlive: true on the runtime DB connection (createPgConnection in
+      // @medusajs/framework/.../pg-connection-loader.js), but the migration connection
+      // (medusa-app-loader.js) is built from raw databaseDriverOptions with no such default,
+      // so it falls back to node-postgres's keepAlive: false. Behind Docker NAT that idle
+      // socket gets dropped mid-migrate, hanging forever right after "Creating migrations
+      // table". Setting it here applies the same resilient socket settings to both.
+      connection: {
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10000,
+        connectionTimeoutMillis: 5000,
+      } as any,
+    },
     http: {
       storeCors: process.env.STORE_CORS!,
       adminCors: process.env.ADMIN_CORS!,
